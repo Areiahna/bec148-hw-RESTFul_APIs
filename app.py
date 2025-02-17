@@ -1,9 +1,12 @@
 from flask import Flask, jsonify, request
+from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
 from marshmallow import fields, ValidationError
-from connection import connection, Error
+from password import my_password
 
 app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql+mysqlconnector://root:{my_password}@localhost/fitness_center'
+db = SQLAlchemy(app)
 ma = Marshmallow(app)
 
 # Create Flask routes to add, retrieve, update, and delete members from the Members table.
@@ -24,228 +27,158 @@ class MemberSchema(ma.Schema):
 member_schema = MemberSchema()
 members_schema = MemberSchema(many= True)
 
+
+class Member(db.Model):
+    __tablename__ = 'Members'
+    id = db.Column(db.Integer,primary_key=True)
+    name = db.Column(db.String(75), nullable=False)
+    email = db.Column(db.String(150))
+    start_date = db.Column(db.Date, nullable=False)
+    # One member can have many sessions
+    sessions = db.relationship('Session', backref='member')
+
 class SessionSchema(ma.Schema):
     id = fields.Int(dump_only= True) 
     instructor = fields.String(required= True) 
     duration = fields.String()
     session_date = fields.String()
     category = fields.String()
+    member_id = fields.Int(nullable=False)
 
     class Meta:
-        fields = ("id","instructor", "duration", "session_date","category")
+        fields = ("id","instructor", "duration", "session_date","category","member_id")
 
 session_schema = SessionSchema()
 sessions_schema = SessionSchema(many= True)
 
-@app.route('/')
-def home():
-    return "YOUR PAGE IS UP AND RUNNING"
+class Session(db.Model):
+    __tablename__ = "Workout_Sessions"
+    id = db.Column(db.Integer,primary_key=True)
+    category = db.Column(db.String(75), nullable=False)
+    instructor = db.Column(db.String(75), nullable=False)
+    duration = db.Column(db.String(30))
+    session_date = db.Column(db.Date,nullable=False)
+    member_id = db.Column(db.Integer, db.ForeignKey('Members.id'))
 
-# --- FETCHING MEMBER DATA
+
+# Initialize the database
+with app.app_context():
+    db.create_all()
+
+
+# --- GET MEMBERS
 @app.route('/members')
-def view_members():
-    conn = connection()
-    if conn is not None:
-        try:
-            cursor = conn.cursor(dictionary= True)
-            query = "SELECT * FROM members;"
+def get_members():
+    members = Member.query.all()
+    return members_schema.jsonify(members)
 
-            cursor.execute(query)
 
-            members = cursor.fetchall()
-
-        except Error as e:
-            print("Failed to return member data")
-            print(f"Error: {e}")
-
-        finally:
-            if conn and conn.is_connected():
-                cursor.close()
-                conn.close()
-                return members_schema.jsonify(members)
-
-# --- ADDING MEMBER TO SQL DATABASE
+# --- ADD MEMBER 
 @app.route('/members', methods=['POST'])
 def add_member():
     try:
+        # Validate and deserialize input
         member_data = member_schema.load(request.json)
-
     except ValidationError as e:
-        return jsonify(e.message), 400
-    
-    conn = connection()
+        return jsonify(e.messages), 400
 
-    if conn is not None:
-        try: 
-            cursor = conn.cursor()
+    new_member =                                                            Member(name=member_data['name'],
+          email=member_data['email'],
+          start_date=member_data['start_date'])
+                                                                 
+    db.session.add(new_member)
+    db.session.commit()
 
-            #-- Creating new_member
-            new_member = (member_data["name"], member_data["email"], member_data["start_date"])
-
-            # --- SQL COMMAND TO ADD TO MEMBERS TABLE
-            query = "INSERT INTO members (name, email, start_date) VALUES (%s, %s, %s)"
-
-            # -- COMMITING/SAVING MEMBER
-            cursor.execute(query, new_member)
-            conn.commit()
-
-            return jsonify({'message': 'New member added successfully!'}), 200
-
-        except Error as e:
-            return jsonify(e.messages), 500
-  
-        finally:
-            cursor.close()
-            conn.close()
-    else:
-        return jsonify({"error": "CONNECTION FAILED SUS"}), 500
-
-@app.route('/members/<int:id>', methods=['GET'])
-def get_member(id):
-    conn = connection()
-    if conn is not None:
-        try:
-            cursor = conn.cursor(dictionary= True)
-            query = "SELECT * FROM members WHERE id = %s"
-
-            cursor.execute(query, (id,))
-            member = cursor.fetchone()
-            if not member:
-                return jsonify({"error": "Member not found."}), 404
-
-            cursor.execute(query)
-
-        except Error as e:
-            print("Failed to return member data")
-            print(f"Error: {e}")
-
-        finally:
-            if conn and conn.is_connected():
-                cursor.close()
-                conn.close()
-                return member_schema.jsonify(member)
+    return jsonify({"message": "New member added succesfully"}),201
 
 
-# Develop routes to schedule, update, and view workout sessions.
-# Implement a route to retrieve all workout sessions for a specific member.
-
-# -- VIEW SESSIONS
-@app.route('/sessions')
-def view_sessions():
-    conn = connection()
-    if conn is not None:
-        try:
-            cursor = conn.cursor(dictionary= True)
-            query = "SELECT * FROM workout_sessions;"
-
-            cursor.execute(query)
-
-            sessions = cursor.fetchall()
-
-        except Error as e:
-            print("Failed to return workout_sessions data")
-            print(f"Error: {e}")
-
-        finally:
-            if conn and conn.is_connected():
-                cursor.close()
-                conn.close()
-                return sessions_schema.jsonify(sessions)
-
-# -- UPDATE SESSIONS
-@app.route('/sessions/update/<int:id>', methods= ["PUT"])
-def update_session(id):
+# --- UPDATE MEMBER
+@app.route('/members/<int:id>', methods=['PUT'])
+def update_member(id):
+    member = Member.query.get_or_404(id)
     try:
-        session_data = session_schema.load(request.json)
+        member_data= member_schema.load(request.json)    
+
     except ValidationError as e:
         return jsonify(e.messages), 400
     
-    conn = connection()
-    if conn is not None:
-        try:
-            cursor = conn.cursor()
+    member.name = member_data['name']
+    member.email = member_data['email']
+    member.start_date = member_data['start_date']
+    db.session.commit()
 
-            query = "SELECT * FROM workout_sessions WHERE id = %s"
-            cursor.execute(query, (id,))
-            session = cursor.fetchone()
-            if not session :
-                return jsonify({"error": "Session was not found."}), 404
-            
-            updated_session = (session_data['instructor'], session_data['duration'], session_data['session_date'],session_data["category"],id)
+    return jsonify({"message": "Member details updated sucessfully"}), 200
+    
+# --- DELETE MEMBER
+@app.route('/members/<int:id>', methods=['DELETE'])
+def delete_member(id):
+    member = Member.query.get_or_404(id)
+    db.session.delete(member)
+    db.session.commit()
 
-            query = "UPDATE workout_sessions SET instructor = %s, duration = %s, session_date = %s, category = %s WHERE id = %s"
+    return jsonify({"message": "Member removed successfully"}), 200
 
-            cursor.execute(query, updated_session)
-            conn.commit()
+#  Develop routes to schedule, update, and view workout sessions. Implement a route to retrieve all workout sessions for a specific member.
 
-            return jsonify({'message': f"Successfully update workout_session {id}"}), 200
-        except Error as e:
-            return jsonify(e.messages), 500
-        finally:
-            cursor.close()
-            conn.close()
+# --- VIEW SESSIONS
+@app.route('/sessions')
+def get_sessions():
+    sessions = Session.query.all()
+    return sessions_schema.jsonify(sessions)
+
+
+# --- GET SESSIONS BY MEMBER
+@app.route('/sessions/by-member_id', methods=['GET'])
+def get_member_sessions():
+    member_id = request.args.get('member_id')
+    sessions = Session.query.filter_by(member_id=member_id).all()
+    if sessions:
+        return sessions_schema.jsonify(sessions)
     else:
-        return jsonify({"error": "Databse connection failed"}), 500
+        return jsonify({"message : Member sessions not found"}), 404
 
-# -- SCHEDULE SESSION
+
+# --- SCHEDULE SESSIONS
 @app.route('/sessions', methods=['POST'])
 def schedule_session():
     try:
+        # Validate and deserialize input
         session_data = session_schema.load(request.json)
+    except ValidationError as e:
+        return jsonify(e.messages), 400
+
+    new_session =                                                           Session(category=session_data['category'],
+          instructor=session_data['instructor'],
+          session_date=session_data['session_date'],
+          duration=session_data['duration'],
+          member_id=session_data['member_id']
+          )
+                                                                 
+    db.session.add(new_session)
+    db.session.commit()
+
+    return jsonify({"message": "New session scheduled succesfully"}),201
+
+
+# --- UPDATE SESSIONS
+@app.route('/sessions/<int:id>', methods=['PUT'])
+def update_session(id):
+    session = Session.query.get_or_404(id)
+    try:
+        session_data= session_schema.load(request.json)    
 
     except ValidationError as e:
-        return jsonify(e.message), 400
+        return jsonify(e.messages), 400
     
-    conn = connection()
+    session.instructor = session_data['instructor']
+    session.category = session_data['category']
+    session.session_date = session_data['session_date']
+    session.duration = session_data['duration']
+    session.member_id = session_data['member_id']
+    db.session.commit()
 
-    if conn is not None:
-        try: 
-            cursor = conn.cursor()
+    return jsonify({"message": "Workout Session details updated sucessfully"}), 200
 
-            new_session = (session_data["instructor"], session_data["duration"], session_data["session_date"], session_data["category"])
-
-            query = "INSERT INTO workout_sessions (instructor, duration, session_date,category) VALUES (%s, %s, %s, %s)"
-
-            cursor.execute(query, new_session)
-            conn.commit()
-
-            return jsonify({'message': 'New session scheduled successfully!'}), 200
-
-        except Error as e:
-            return jsonify(e.messages), 500
-  
-        finally:
-            cursor.close()
-            conn.close()
-    else:
-        return jsonify({"error": "CONNECTION FAILED"}), 500
-
-@app.route('/sessions/members/<int:id>', methods=['GET'])
-def get_member_sessions(id):
-    conn = connection()
-    if conn is not None:
-        try:
-            cursor = conn.cursor(dictionary= True)
-            query ="SELECT * FROM workout_sessions WHERE member_id = %s "
-            cursor.execute(query, (id,))
-            sessions = cursor.fetchall()
-
-            if not sessions:
-                return jsonify({"error": "Sessions not found."}), 404
-
-            cursor.execute(query)
-
-        except Error as e:
-            print("Failed to return member sessions data")
-            print(f"Error: {e}")
-
-        finally:
-            if conn and conn.is_connected():
-                cursor.close()
-                conn.close()
-                return sessions_schema.jsonify(sessions)
-
-   
 
 if __name__ == "__main__":
     app.run(debug=True)
